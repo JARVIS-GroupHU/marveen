@@ -1220,19 +1220,18 @@ function provisionIsolatedConfigDir(
     // an otherwise correctly authenticated agent lands on the login picker
     // (measured on korall, 2026-08-19). It needs a REAL file of its own here.
     const perUserAgent = readAgentRunAsUser(name) != null
+    // Defensively drop a real .credentials.json that an older build may have
+    // symlinked/copied here, so the env-var token is the only auth source.
+    // An own_team agent is the exception: its .credentials.json IS its own
+    // /login credential, written here by `claude auth login`, and deleting it
+    // on every spawn logs the agent out (OWNTEAMCREDWIPE1008). This runs whether
+    // or not the shared dir holds a .credentials.json: the Linux credentials-guard
+    // renames that file, and a macOS host never has one (ISOCREDSCRUB1119).
+    if (readAgentAuthMode(name) !== 'own_team') {
+      try { rmSync(join(cfg, '.credentials.json'), { force: true }) } catch { /* absent */ }
+    }
     for (const entry of readdirSync(realClaude)) {
-      if (ISOLATED_CONFIG_SKIP.has(entry) || (perUserAgent && entry === '.claude.json')) {
-        // Defensively drop a real .credentials.json that an older build may have
-        // symlinked/copied here, so the env-var token is the only auth source.
-        // An own_team agent is the exception: its .credentials.json IS its own
-        // /login credential, written here by `claude auth login`, and deleting it
-        // on every spawn logs the agent out (OWNTEAMCREDWIPE1008).
-        const stale = join(cfg, entry)
-        if (entry === '.credentials.json' && readAgentAuthMode(name) !== 'own_team') {
-          try { rmSync(stale, { force: true }) } catch { /* absent */ }
-        }
-        continue
-      }
+      if (ISOLATED_CONFIG_SKIP.has(entry) || (perUserAgent && entry === '.claude.json')) continue
       const link = join(cfg, entry)
       let needsLink = true
       try {

@@ -103,6 +103,31 @@ describe('ensureIsolatedChannelConfigDir', () => {
     expect(existsSync(join(cfg, '.credentials.json'))).toBe(false)
   })
 
+  it('removes a stale .credentials.json when the shared one is absent (ISOCREDSCRUB1119)', () => {
+    // The Linux credentials-guard renames the shared ~/.claude/.credentials.json, and
+    // a macOS host never has one (the login lives in the Keychain). The removal used
+    // to run only while iterating the shared dir, so on such a host a stale isolated
+    // credential was never dropped.
+    const shared = join(SANDBOX, 'home', '.claude')
+    rmSync(join(shared, '.credentials.json'))
+    writeFileSync(join(shared, '.credentials.json.bak'), '{"claudeAiOauth":{}}')
+    const cfg = join(SANDBOX, 'agents', 'testagent', '.claude-config')
+    mkdirSync(cfg, { recursive: true })
+    writeFileSync(join(cfg, '.credentials.json'), '{"stale":true}')
+    ensureIsolatedChannelConfigDir('testagent', 'telegram')
+    expect(existsSync(join(cfg, '.credentials.json'))).toBe(false)
+  })
+
+  it('keeps an own_team agent\'s own .credentials.json when the shared one is absent (ISOCREDSCRUB1119)', () => {
+    AUTH_MODE.testagent = 'own_team'
+    rmSync(join(SANDBOX, 'home', '.claude', '.credentials.json'))
+    const cfg = join(SANDBOX, 'agents', 'testagent', '.claude-config')
+    mkdirSync(cfg, { recursive: true })
+    writeFileSync(join(cfg, '.credentials.json'), '{"own":true}')
+    ensureIsolatedChannelConfigDir('testagent', 'telegram')
+    expect(readFileSync(join(cfg, '.credentials.json'), 'utf-8')).toBe('{"own":true}')
+  })
+
   it('keeps an own_team agent\'s own .credentials.json (OWNTEAMCREDWIPE1008)', () => {
     // own_team: the file is the agent's own `claude auth login` credential, not a
     // stale copy -- deleting it on every spawn logged the agent out.
