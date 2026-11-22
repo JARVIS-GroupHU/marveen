@@ -20648,10 +20648,12 @@ function tuGetTimeRange() {
 async function loadTokenUsage() {
   const { from, to } = tuGetTimeRange()
   const agent = tuSelectedAgent
+  const claudeOnly = document.getElementById('tuClaudeOnly')?.checked ?? true
 
   const params = new URLSearchParams()
   if (from) params.set('from', from)
   if (to) params.set('to', to)
+  if (claudeOnly) params.set('claudeOnly', '1')
 
   const summaryRes = await fetch('/api/token-usage/summary?' + params)
   if (!summaryRes.ok) return
@@ -20687,6 +20689,9 @@ async function loadTokenUsage() {
 
   const qhRes = await fetch('/api/token-usage/rate-limit-history?' + params)
   if (qhRes.ok) renderTuQuotaHistory(await qhRes.json())
+
+  const quotaRes = await fetch('/api/overview')
+  renderTuPaceCards(quotaRes.ok ? (await quotaRes.json()).quota : null)
 
   tuDetailSearch = ''
   const searchEl = document.getElementById('tuSearchInput')
@@ -20876,9 +20881,12 @@ function renderTuTimeline(data, filterAgent) {
   const h = cssH - pad.top - pad.bottom
 
   const bucketMap = {}
+  const bucketMapOut = {}
   for (const d of filled) {
     if (!bucketMap[d.bucket]) bucketMap[d.bucket] = {}
+    if (!bucketMapOut[d.bucket]) bucketMapOut[d.bucket] = {}
     bucketMap[d.bucket][d.agent] = (bucketMap[d.bucket][d.agent] || 0) + (d.inputTokens || 0)
+    bucketMapOut[d.bucket][d.agent] = (bucketMapOut[d.bucket][d.agent] || 0) + (d.outputTokens || 0)
   }
 
   const bucketTotals = {}
@@ -20939,12 +20947,13 @@ function renderTuTimeline(data, filterAgent) {
     const drawAgents = filterAgent ? [filterAgent] : agents
     for (const agent of drawAgents) {
       const val = bucketMap[buckets[i]]?.[agent] || 0
+      const outVal = bucketMapOut[buckets[i]]?.[agent] || 0
       const barH = (val / maxVal) * h
       ctx.globalAlpha = barDimmed ? 0.2 : 1
       ctx.fillStyle = tuGetColor(agent)
       ctx.fillRect(x, pad.top + h - yOffset - barH, barW, barH)
       ctx.globalAlpha = 1
-      if (val > 0) segments.push({ agent, val })
+      if (val > 0 || outVal > 0) segments.push({ agent, val, outVal })
       yOffset += barH
     }
     barRects.push({ x, w: barW + barGap, bucket: buckets[i], segments, totalH: yOffset })
@@ -21104,11 +21113,15 @@ function renderTuTimeline(data, filterAgent) {
       const isPeak = tuIsPeakHour(hit.bucket)
       let html = `<div style="font-weight:600;margin-bottom:4px">${tuFormatLocalShort(hit.bucket)}${isPeak ? ` <span style="color:#ef4444;font-size:10px">${t('tokenUsage.chart.peak')}</span>` : ''}</div>`
       let total = 0
+      let totalOut = 0
+      const inLabel = t('tokenUsage.chart.input_short')
+      const outLabel = t('tokenUsage.chart.output_short')
       for (const seg of hit.segments) {
-        html += `<div><span style="color:${tuGetColor(seg.agent)}">&#9632;</span> ${escapeHtml(seg.agent)}: ${tuFormatTokens(seg.val)}</div>`
+        html += `<div><span style="color:${tuGetColor(seg.agent)}">&#9632;</span> ${escapeHtml(seg.agent)}: ${inLabel} ${tuFormatTokens(seg.val)} &middot; ${outLabel} ${tuFormatTokens(seg.outVal)}</div>`
         total += seg.val
+        totalOut += seg.outVal
       }
-      if (hit.segments.length > 1) html += `<div style="border-top:1px solid rgba(255,255,255,0.2);margin-top:4px;padding-top:4px;font-weight:600">${t('tokenUsage.total')} ${tuFormatTokens(total)}</div>`
+      if (hit.segments.length > 1) html += `<div style="border-top:1px solid rgba(255,255,255,0.2);margin-top:4px;padding-top:4px;font-weight:600">${t('tokenUsage.total')} ${inLabel} ${tuFormatTokens(total)} &middot; ${outLabel} ${tuFormatTokens(totalOut)}</div>`
       if (tuChartState.win5h || tuChartState.winWeekly) {
         const idx = barRects.indexOf(hit)
         if (idx >= 0) {
@@ -21177,6 +21190,75 @@ function renderTuBudgetCards() {
       if (renderTuTimeline.__lastData) renderTuTimeline(renderTuTimeline.__lastData, renderTuTimeline.__lastAgent)
       renderTuBudgetCards()
     })
+  })
+}
+
+// Countdown-to-reset + pace indicator for the Claude 5h/weekly rate-limit
+// windows, from /api/overview's `quota` block (same QuotaSnapshot the
+// Overview page's quota strip uses -- see src/web/quota.ts). "Pace" compares
+// how much of the window's TIME has elapsed against how much of its
+// PERCENTAGE is used: at 50% elapsed, 50% used is exactly on pace. Peter's
+// own tolerance (2026-11-22 kerese): used <= expected -> blue (ahead, saving
+// budget), used within expected+10 -> green (on pace), beyond that -> red
+// dot (burning faster than the window has left).
+let _tuPaceInterval = null
+
+function renderTuPaceCards(quota) {
+  const el = document.getElementById('tuPaceCards')
+  if (!el) return
+  if (_tuPaceInterval) { clearInterval(_tuPaceInterval); _tuPaceInterval = null }
+  if (!quota || quota.status === 'missing') {
+    el.innerHTML = ''
+    return
+  }
+  const nowSec = Math.floor(Date.now() / 1000)
+  const defs = [
+    { w: quota.fiveHour, lenSec: 5 * 3600, labelKey: 'tokenUsage.window_5h_label', color: '#06b6d4' },
+    { w: quota.sevenDay, lenSec: 7 * 86400, labelKey: 'tokenUsage.window_weekly_label', color: '#8b5cf6' },
+  ]
+  el.innerHTML = defs.map(d => {
+    const w = d.w
+    if (!w || w.expired || typeof w.resetsAt !== 'number') {
+      return `
+        <div class="overview-stat" style="border-left:3px solid ${d.color}">
+          <div class="overview-stat-label">${t(d.labelKey)}</div>
+          <div class="overview-stat-value" style="color:var(--text-muted);font-size:14px">${t('tokenUsage.pace.no_window')}</div>
+        </div>`
+    }
+    const usedPct = Math.max(0, Math.min(100, w.usedPercentage))
+    const elapsedFrac = Math.max(0, Math.min(1, 1 - (w.resetsAt - nowSec) / d.lenSec))
+    const expectedPct = elapsedFrac * 100
+    const diff = usedPct - expectedPct
+    let dotColor, paceKey
+    if (diff <= 0) { dotColor = '#3b82f6'; paceKey = 'tokenUsage.pace.under' }
+    else if (diff <= 10) { dotColor = '#22c55e'; paceKey = 'tokenUsage.pace.ontrack' }
+    else { dotColor = '#ef4444'; paceKey = 'tokenUsage.pace.over' }
+    return `
+      <div class="overview-stat" style="border-left:3px solid ${d.color}">
+        <div class="overview-stat-label" style="display:flex;align-items:center;gap:6px">
+          <span style="width:8px;height:8px;border-radius:50%;background:${dotColor};flex-shrink:0;display:inline-block"></span>
+          ${t(d.labelKey)}
+        </div>
+        <div class="overview-stat-value tu-pace-countdown" data-timeout="${w.resetsAt}" style="color:${d.color};font-size:18px"></div>
+        <div class="overview-stat-sub">${t('tokenUsage.pace.used_vs_expected', { used: Math.round(usedPct), expected: Math.round(expectedPct) })}</div>
+        <div class="overview-stat-sub" style="color:${dotColor}">${t(paceKey)}</div>
+      </div>`
+  }).join('')
+  _updateTuPaceCountdowns()
+  _tuPaceInterval = setInterval(_updateTuPaceCountdowns, 1000)
+}
+
+function _updateTuPaceCountdowns() {
+  const now = Math.floor(Date.now() / 1000)
+  document.querySelectorAll('.tu-pace-countdown[data-timeout]').forEach(el => {
+    const timeout = parseInt(el.dataset.timeout, 10)
+    const diff = timeout - now
+    if (diff <= 0) { el.textContent = t('tokenUsage.pace.expired'); return }
+    const dd = Math.floor(diff / 86400)
+    const hh = Math.floor((diff % 86400) / 3600)
+    const mm = Math.floor((diff % 3600) / 60)
+    const ss = diff % 60
+    el.textContent = dd > 0 ? `${dd}d ${hh}h` : hh > 0 ? `${hh}h ${mm}m` : `${mm}m ${ss}s`
   })
 }
 
@@ -21257,12 +21339,28 @@ function renderTuQuotaHistory(points) {
     ctx.stroke()
   }
 
-  ctx.fillStyle = textSecondary
+  // Ruler: several labeled ticks (not just the two endpoints) so a specific
+  // point on the line can be read off the time axis -- Peter 2026-11-22
+  // kerese, a korabbi ket-vegpontos felirat nem volt eleg pontos leolvasashoz.
+  const tickCount = Math.max(2, Math.min(8, Math.floor(w / 90)))
   ctx.font = '11px sans-serif'
-  ctx.textAlign = 'left'
-  ctx.fillText(tuFormatLocalShort(tMin), pad.left, cssH - 8)
-  ctx.textAlign = 'right'
-  ctx.fillText(tuFormatLocalShort(tMax), pad.left + w, cssH - 8)
+  for (let i = 0; i <= tickCount; i++) {
+    const frac = i / tickCount
+    const tickTs = tMin + frac * tRange
+    const x = pad.left + frac * w
+    ctx.save()
+    ctx.strokeStyle = borderColor
+    ctx.lineWidth = 1
+    ctx.globalAlpha = 0.5
+    ctx.beginPath()
+    ctx.moveTo(x, pad.top)
+    ctx.lineTo(x, pad.top + h)
+    ctx.stroke()
+    ctx.restore()
+    ctx.fillStyle = textSecondary
+    ctx.textAlign = i === 0 ? 'left' : i === tickCount ? 'right' : 'center'
+    ctx.fillText(tuFormatLocalShort(tickTs), x, cssH - 8)
+  }
 
   ctx.textAlign = 'left'
   ctx.font = '12px sans-serif'
@@ -21274,7 +21372,56 @@ function renderTuQuotaHistory(points) {
     ctx.fillText(s.label, lx + 14, pad.top - 8)
     lx += ctx.measureText(s.label).width + 34
   }
+
+  tuQuotaChartState = { sorted, tMin, tMax, tRange, pad, w, h }
 }
+
+let tuQuotaChartState = null
+
+;(function setupTuQuotaTooltip() {
+  const canvas = document.getElementById('tuQuotaHistoryCanvas')
+  if (!canvas) return
+  let tooltip = document.getElementById('tuQuotaTooltip')
+  if (!tooltip) {
+    tooltip = document.createElement('div')
+    tooltip.id = 'tuQuotaTooltip'
+    tooltip.style.cssText = 'position:absolute;background:var(--bg-elevated,#1e293b);color:var(--text-primary,#f8fafc);padding:8px 12px;border-radius:6px;font-size:12px;pointer-events:none;z-index:100;display:none;box-shadow:0 4px 12px rgba(0,0,0,0.3);max-width:240px;line-height:1.5'
+    canvas.parentElement.appendChild(tooltip)
+  }
+
+  canvas.addEventListener('mousemove', e => {
+    if (!tuQuotaChartState || !tuQuotaChartState.sorted.length) { tooltip.style.display = 'none'; return }
+    const rect = canvas.getBoundingClientRect()
+    const mx = e.clientX - rect.left
+    const my = e.clientY - rect.top
+    const { sorted, tMin, tRange, pad, w, h } = tuQuotaChartState
+    if (mx < pad.left || mx > pad.left + w || my < pad.top || my > pad.top + h) {
+      tooltip.style.display = 'none'
+      return
+    }
+    const targetTs = tMin + ((mx - pad.left) / w) * tRange
+    let nearest = sorted[0]
+    let bestDiff = Math.abs(sorted[0].ts - targetTs)
+    for (const p of sorted) {
+      const diff = Math.abs(p.ts - targetTs)
+      if (diff < bestDiff) { nearest = p; bestDiff = diff }
+    }
+    let html = `<div style="font-weight:600;margin-bottom:4px">${tuFormatLocalDate(nearest.ts)}</div>`
+    if (nearest.fiveHourPct !== null && nearest.fiveHourPct !== undefined) {
+      html += `<div><span style="color:#06b6d4">&#9632;</span> ${t('tokenUsage.chart.window_5h')}: ${Math.round(nearest.fiveHourPct)}%</div>`
+    }
+    if (nearest.sevenDayPct !== null && nearest.sevenDayPct !== undefined) {
+      html += `<div><span style="color:#8b5cf6">&#9632;</span> ${t('tokenUsage.chart.window_weekly')}: ${Math.round(nearest.sevenDayPct)}%</div>`
+    }
+    tooltip.innerHTML = html
+    tooltip.style.display = 'block'
+    const tx = Math.min(mx + 12, canvas.parentElement.offsetWidth - 200)
+    tooltip.style.left = tx + 'px'
+    tooltip.style.top = (my - 10) + 'px'
+  })
+
+  canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none' })
+})()
 
 let tuDetailData = []
 let tuDetailSort = { col: 'timestamp', dir: 'desc' }
@@ -21420,6 +21567,7 @@ document.getElementById('tuCollectBtn')?.addEventListener('click', async () => {
 
 document.getElementById('tuPeriod')?.addEventListener('change', () => { tuSelectedAgent = ''; loadTokenUsage() })
 document.getElementById('tuAgent')?.addEventListener('change', () => { tuSelectedAgent = document.getElementById('tuAgent').value; loadTokenUsage() })
+document.getElementById('tuClaudeOnly')?.addEventListener('change', () => loadTokenUsage())
 document.getElementById('tuMinTokens')?.addEventListener('change', () => tuFetchDetails())
 document.getElementById('tuToolAgentBreakdown')?.addEventListener('change', () => {
   if (tuToolStatsData) renderTuToolStats(tuToolStatsData)

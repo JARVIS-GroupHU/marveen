@@ -1283,6 +1283,8 @@ window._i18n.hu = {
   'tokenUsage.chart.window_5h':  '5h ablak',
   'tokenUsage.chart.window_weekly': 'heti ablak',
   'tokenUsage.chart.peak':       'CSÚCSIDŐ',
+  'tokenUsage.chart.input_short': 'be',
+  'tokenUsage.chart.output_short': 'ki',
   'connectors.readonly_hint':    'Kezelhető: claude.ai',
 
   // --- Team ---
@@ -1797,6 +1799,12 @@ window._i18n.hu = {
   'tokenUsage.quota_history_title':    'Rate-limit kihasználtság',
   'tokenUsage.quota_history_subtitle': 'Az 5 órás és a 7 napos Claude keret kihasználtsága időben (csak a tényleg mért pontok)',
   'tokenUsage.quota_history_no_data':  'Nincs mért rate-limit adat a kiválasztott időszakra',
+  'tokenUsage.pace.no_window':         'Nincs aktív ablak',
+  'tokenUsage.pace.used_vs_expected':  '{used}% felhasználva / {expected}% várt időarányosan',
+  'tokenUsage.pace.under':             'Takarékos ütem',
+  'tokenUsage.pace.ontrack':           'Ütemben',
+  'tokenUsage.pace.over':              'Gyorsabb fogyás a vártnál',
+  'tokenUsage.pace.expired':           'lejárt',
   'tokenUsage.biggest_calls_title':   'Legnagyobb hívások',
   'tokenUsage.changes_title':         'Változások',
 

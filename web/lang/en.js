@@ -886,6 +886,8 @@ window._i18n.en = {
   'tokenUsage.chart.window_5h':  '5h window',
   'tokenUsage.chart.window_weekly': 'weekly window',
   'tokenUsage.chart.peak':       'PEAK',
+  'tokenUsage.chart.input_short': 'in',
+  'tokenUsage.chart.output_short': 'out',
   'connectors.readonly_hint':    'Managed by: claude.ai',
 
   // --- Team ---
@@ -1354,6 +1356,12 @@ window._i18n.en = {
   'tokenUsage.quota_history_title':    'Rate-limit usage',
   'tokenUsage.quota_history_subtitle': 'The 5-hour and 7-day Claude quota usage over time (measured points only)',
   'tokenUsage.quota_history_no_data':  'No measured rate-limit data for the selected period',
+  'tokenUsage.pace.no_window':         'No active window',
+  'tokenUsage.pace.used_vs_expected':  '{used}% used / {expected}% expected by elapsed time',
+  'tokenUsage.pace.under':             'Under pace (saving budget)',
+  'tokenUsage.pace.ontrack':           'On pace',
+  'tokenUsage.pace.over':              'Burning faster than expected',
+  'tokenUsage.pace.expired':           'expired',
   'tokenUsage.biggest_calls_title':   'Biggest calls',
   'tokenUsage.changes_title':         'Changes',
 
