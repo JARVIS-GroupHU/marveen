@@ -639,6 +639,55 @@ navLinks.forEach((link) => {
   })
 })
 
+// === "Marveen app" mode (card 583630b6) ===
+// Péter's 9-item curated nav (#appModeNav in index.html) replaces the full
+// ~24-item sidebar (#sidebarMainNav) when the page runs as an installed PWA
+// (standalone display-mode) -- that is the one signal that reliably means
+// "this is the phone app, not a desktop browser tab", so it needs no manual
+// toggle to "just work" after Péter adds it to his home screen. Two escape
+// hatches on top of that default: `?app=1` in the URL forces it on even in an
+// ordinary browser tab (useful for testing the curated nav without installing
+// anything), and the nav's own "Dashboard belépés" link forces it back off
+// for the rest of this browser's localStorage (someone opened the installed
+// app wanting the full dashboard, not just these 9 pages). Once a user has
+// clicked that link, the explicit '0' always wins over the standalone
+// auto-detect, even after a fresh install -- that is the intent: it is now a
+// per-browser-profile preference, not a one-off per-page-load toggle.
+const APP_MODE_LS_KEY = 'marveen.appMode'
+// Only SEEDS the preference when none exists yet -- once "Dashboard belépés"
+// has set it to '0', a bookmarked/retained `?app=1` URL must not keep
+// stomping that choice back to '1' on every reload.
+if (new URLSearchParams(location.search).get('app') === '1' && localStorage.getItem(APP_MODE_LS_KEY) === null) {
+  localStorage.setItem(APP_MODE_LS_KEY, '1')
+}
+function isStandalonePWA() {
+  return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true
+}
+function appModeActive() {
+  const stored = localStorage.getItem(APP_MODE_LS_KEY)
+  if (stored === '0') return false
+  if (stored === '1') return true
+  return isStandalonePWA()
+}
+function applyAppModeUI() {
+  // .sidebar-nav's own `display: flex` rule (style.css) outranks the
+  // browser's default `[hidden]{display:none}` (author stylesheets always
+  // beat the user-agent one, specificity aside), so the `hidden` PROPERTY
+  // would silently do nothing here -- toggle `style.display` directly instead.
+  const active = appModeActive()
+  const mainNav = document.getElementById('sidebarMainNav')
+  const appNav = document.getElementById('appModeNav')
+  if (mainNav) mainNav.style.display = active ? 'none' : ''
+  if (appNav) appNav.style.display = active ? '' : 'none'
+}
+document.getElementById('appModeExitLink')?.addEventListener('click', (e) => {
+  e.preventDefault()
+  localStorage.setItem(APP_MODE_LS_KEY, '0')
+  applyAppModeUI()
+  setSidebarOpen(false)
+})
+applyAppModeUI()
+
 // === Collapsible sidebar groups ===
 // Open/closed state lives in localStorage (marveen.sidebarGroups) as a JSON
 // array of open group keys. Missing or corrupt state means everything starts
@@ -17483,9 +17532,11 @@ function _renderApprovalsStats() {
     <div class="stat-card"><div class="stat-value" style="color:var(--text-muted)">${counts.timeout}</div><div class="stat-label">${t('approvals.stat.timeout')}</div></div>
   `
 
-  // Sidebar badge: show pending count, hidden when zero
-  const badge = document.getElementById('approvalsPendingBadge')
-  if (badge) {
+  // Sidebar badge: show pending count, hidden when zero. Two ids: the full
+  // sidebar's and the app-mode curated nav's own copy of the same badge.
+  for (const id of ['approvalsPendingBadge', 'approvalsPendingBadgeApp']) {
+    const badge = document.getElementById(id)
+    if (!badge) continue
     badge.textContent = counts.pending
     badge.hidden = counts.pending === 0
   }

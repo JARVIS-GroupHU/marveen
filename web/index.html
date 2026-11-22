@@ -75,7 +75,7 @@
         <div class="sidebar-brand-sub">online</div>
       </div>
     </div>
-    <nav class="sidebar-nav">
+    <nav class="sidebar-nav" id="sidebarMainNav">
       <a href="#" class="sb-link active" data-page="overview">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
         <span class="sb-label">Áttekintés</span>
@@ -223,6 +223,54 @@
           </a>
         </div>
       </div>
+    </nav>
+    <!-- "Marveen app" curated nav (card 583630b6, Péter 9-pontos specifikációja,
+         pontosan ebben a sorrendben): a teljes ~24-elemes sidebar helyett, amikor
+         a PWA telepített/standalone módban fut (vagy ?app=1 / localStorage
+         marveen.appMode=1 van beállítva), csak ez a 9 pont látszik. Ugyanazokra
+         a data-page célokra mutat mint a fenti teljes nav, tehát a meglévő
+         switchPage()/navLinks logika változtatás nélkül kiszolgálja -- ez a blokk
+         csak egy másik BELÉPÉSI PONT ugyanazokhoz az oldalakhoz, nem új oldal.
+         "Dashboard belépés" kivétel: az nem egy page-re mutat, hanem kilép az
+         app-módból és visszahozza a teljes sidebart (lásd app.js appModeExitLink). -->
+    <nav class="sidebar-nav app-mode-nav" id="appModeNav" hidden style="display:none">
+      <a href="#" class="sb-link" data-page="kanban">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="10" rx="1"/><rect x="17" y="4" width="4" height="13" rx="1"/></svg>
+        <span class="sb-label">Kanban tábla</span>
+      </a>
+      <a href="#" class="sb-link" data-page="projects">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+        <span class="sb-label">Projektek</span>
+      </a>
+      <a href="#" class="sb-link" data-page="ideas">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+        <span class="sb-label">Ötletláda</span>
+      </a>
+      <a href="#" class="sb-link" data-page="research">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <span class="sb-label">Kutatás</span>
+      </a>
+      <a href="#" class="sb-link" data-page="notes">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
+        <span class="sb-label">Jegyzetek</span>
+      </a>
+      <a href="#" class="sb-link" data-page="tokenUsage">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
+        <span class="sb-label">Claude Usage</span>
+      </a>
+      <a href="#" class="sb-link" data-page="approvals">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+        <span class="sb-label">Jóváhagyások</span>
+        <span class="approvals-pending-badge sb-badge" id="approvalsPendingBadgeApp" hidden></span>
+      </a>
+      <a href="#" class="sb-link" id="appModeExitLink">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        <span class="sb-label">Dashboard belépés</span>
+      </a>
+      <a href="#" class="sb-link" data-page="agents">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        <span class="sb-label">Ügynökök</span>
+      </a>
     </nav>
     <div class="sidebar-docs">
       <!-- KILLSWITCH1022: the fleet's red button. Anyone signed in may pull it;
