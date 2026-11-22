@@ -35,9 +35,11 @@ export async function tryHandleTokenUsage(ctx: RouteContext): Promise<boolean> {
   if (path === '/api/token-usage/summary' && method === 'GET') {
     const from = url.searchParams.get('from')
     const to = url.searchParams.get('to')
+    const claudeOnly = url.searchParams.get('claudeOnly') === '1'
     const summary = getTokenSummary(
       from ? parseInt(from) : undefined,
       to ? parseInt(to) : undefined,
+      claudeOnly,
     )
     jsonMaybeGzip(req, res, summary)
     return true
@@ -48,11 +50,13 @@ export async function tryHandleTokenUsage(ctx: RouteContext): Promise<boolean> {
     const from = url.searchParams.get('from')
     const to = url.searchParams.get('to')
     const agent = url.searchParams.get('agent') || undefined
+    const claudeOnly = url.searchParams.get('claudeOnly') === '1'
     const timeline = getTokenTimeline(
       bucketMinutes,
       from ? parseInt(from) : undefined,
       to ? parseInt(to) : undefined,
       agent,
+      claudeOnly,
     )
     json(res, timeline)
     return true
@@ -63,6 +67,7 @@ export async function tryHandleTokenUsage(ctx: RouteContext): Promise<boolean> {
     const to = url.searchParams.get('to')
     const agent = url.searchParams.get('agent') || undefined
     const model = url.searchParams.get('model') || undefined
+    const claudeOnly = url.searchParams.get('claudeOnly') === '1'
     // APRO920 (c)(1): ?model=<id> switches this endpoint from "how many rows
     // per model" to "which agent/session/task drove THIS model's rows" --
     // API only (spec D-3), no UI in this PR.
@@ -78,6 +83,7 @@ export async function tryHandleTokenUsage(ctx: RouteContext): Promise<boolean> {
       from ? parseInt(from) : undefined,
       to ? parseInt(to) : undefined,
       agent,
+      claudeOnly,
     ))
     return true
   }
