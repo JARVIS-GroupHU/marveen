@@ -90,64 +90,101 @@ describe('parseQuotaSnapshot', () => {
   })
 })
 
-describe('noteQuotaBlindness -- the blind gate is never silent, and never noisy', () => {
+describe('noteQuotaBlindness -- never silent, and never noisy on a single blip (Péter, 2026-11-23: needs 3 distinct strikes)', () => {
   const NOW = Date.UTC(2026, 10, 16, 12, 0, 0)
   const estimate = { source: 'estimate', generatedAtMs: NOW - 60_000, windows: null }
   const fresh = { source: 'ratelimit_headers', generatedAtMs: NOW - 60_000, windows: { seven_day: { used_percent: 22, resets_at: NOW / 1000 + 3600 } } }
   const old = { ...fresh, generatedAtMs: NOW - 3 * 60 * 60_000 }
 
-  let saved: string | null = null
-  const store = { read: () => saved, write: (k: string) => { saved = k || null } }
+  let saved: { countingKey: string | null; occurrences: number; lastReadingAtMs: number | null; alertedKey: string | null }
+  const store = {
+    read: () => saved,
+    write: (s: typeof saved) => { saved = s },
+  }
   const note = (s: Parameters<typeof noteQuotaBlindness>[0], t: number, n: (x: string) => void) => noteQuotaBlindness(s, t, n, store)
-  beforeEach(() => { resetQuotaBlindStateForTest(); saved = null })
+  beforeEach(() => {
+    resetQuotaBlindStateForTest()
+    saved = { countingKey: null, occurrences: 0, lastReadingAtMs: null, alertedKey: null }
+  })
   afterEach(() => vi.restoreAllMocks())
 
-  it('estimate: one warn + one owner notice, then quiet on every later tick', () => {
+  it('one bad reading, re-checked on several ticks, never alerts: repeats of the same reading do not count', () => {
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined as never)
     const notify = vi.fn()
     for (let i = 0; i < 5; i++) note(estimate, NOW + i * 60_000, notify)
-    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledTimes(1) // logged once, when first seen; the repeats are silent
+    expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('needs three distinct blind readings before it notifies', () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined as never)
+    const notify = vi.fn()
+    const r1 = estimate
+    const r2 = { ...estimate, generatedAtMs: estimate.generatedAtMs + 15 * 60_000 }
+    const r3 = { ...estimate, generatedAtMs: estimate.generatedAtMs + 30 * 60_000 }
+    note(r1, NOW, notify)
+    note(r1, NOW + 60_000, notify) // repeat tick of r1: must not count as a 2nd strike
+    expect(notify).not.toHaveBeenCalled()
+    note(r2, NOW + 15 * 60_000, notify) // 2nd distinct reading
+    expect(notify).not.toHaveBeenCalled()
+    note(r3, NOW + 30 * 60_000, notify) // 3rd distinct reading -> alert
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify.mock.calls[0][0]).toContain('"estimate"')
+    expect(warn).toHaveBeenCalledTimes(3) // once per distinct reading, not once per tick
+  })
+
+  it('a kind/source change resets the streak -- each new signature needs its own three strikes', () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined as never)
+    const notify = vi.fn()
+    note(old, NOW, notify) // stale-snapshot, strike 1
+    note(old, NOW + 60_000, notify) // repeat: no new strike
+    note(estimate, NOW + 120_000, notify) // untrusted-source: different signature, resets to strike 1
+    expect(notify).not.toHaveBeenCalled()
+    expect(warn).toHaveBeenCalledTimes(2)
+    const estimate2 = { ...estimate, generatedAtMs: estimate.generatedAtMs + 60_000 }
+    const estimate3 = { ...estimate, generatedAtMs: estimate.generatedAtMs + 120_000 }
+    note(estimate2, NOW + 180_000, notify) // strike 2 for this signature
+    expect(notify).not.toHaveBeenCalled()
+    note(estimate3, NOW + 240_000, notify) // strike 3 -> alert
     expect(notify).toHaveBeenCalledTimes(1)
     expect(notify.mock.calls[0][0]).toContain('"estimate"')
   })
 
-  it('stale > 2h: one warn + one notice; blind kind change logs but does not re-alert', () => {
-    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined as never)
-    const notify = vi.fn()
-    note(old, NOW, notify)
-    note(old, NOW + 60_000, notify)
-    expect(notify).toHaveBeenCalledTimes(1)
-    expect(notify.mock.calls[0][0]).toContain('180 perce')
-    note(estimate, NOW + 120_000, notify)
-    expect(warn).toHaveBeenCalledTimes(2)
-    expect(notify).toHaveBeenCalledTimes(1)
-  })
-
-  it('recovers with one info line, and a new blind spell alerts again', () => {
+  it('recovers with one info line, and a new blind spell needs its own three strikes to alert again', () => {
     vi.spyOn(logger, 'warn').mockImplementation(() => undefined as never)
     const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined as never)
     const notify = vi.fn()
     note(estimate, NOW, notify)
-    note(fresh, NOW, notify)
-    note(fresh, NOW + 60_000, notify)
+    note({ ...estimate, generatedAtMs: estimate.generatedAtMs + 60_000 }, NOW + 60_000, notify)
+    note({ ...estimate, generatedAtMs: estimate.generatedAtMs + 120_000 }, NOW + 120_000, notify)
+    expect(notify).toHaveBeenCalledTimes(1) // first spell's 3rd strike alerted
+
+    note(fresh, NOW + 180_000, notify)
+    note(fresh, NOW + 240_000, notify)
     expect(info).toHaveBeenCalledTimes(1)
-    note(estimate, NOW + 120_000, notify)
+
+    note(estimate, NOW + 300_000, notify) // new spell, strike 1
+    note({ ...estimate, generatedAtMs: estimate.generatedAtMs + 360_000 }, NOW + 360_000, notify) // strike 2
+    expect(notify).toHaveBeenCalledTimes(1) // still just the first spell's alert
+    note({ ...estimate, generatedAtMs: estimate.generatedAtMs + 420_000 }, NOW + 420_000, notify) // strike 3
     expect(notify).toHaveBeenCalledTimes(2)
   })
 
-  it('restarts while the same blindness lasts do not alert again, even on rewritten snapshots; another source does', () => {
+  it('a restart after the alert already fired does not cause a duplicate notice for the same streak', () => {
     vi.spyOn(logger, 'warn').mockImplementation(() => undefined as never)
     const notify = vi.fn()
     note(estimate, NOW, notify)
-    for (let i = 1; i <= 3; i++) {
-      resetQuotaBlindStateForTest() // dashboard restart: in-memory state lost, store kept
-      // a running collector rewrites the estimate every 15 minutes
-      note({ ...estimate, generatedAtMs: (estimate.generatedAtMs ?? NOW) + i * 15 * 60_000 }, NOW + i * 15 * 60_000, notify)
-    }
+    note({ ...estimate, generatedAtMs: estimate.generatedAtMs + 60_000 }, NOW + 60_000, notify)
+    note({ ...estimate, generatedAtMs: estimate.generatedAtMs + 120_000 }, NOW + 120_000, notify)
+    expect(notify).toHaveBeenCalledTimes(1)
+    resetQuotaBlindStateForTest() // dashboard restart: in-memory state lost, store (streak) kept
+    note({ ...estimate, generatedAtMs: estimate.generatedAtMs + 180_000 }, NOW + 180_000, notify) // same streak, still estimate
     expect(notify).toHaveBeenCalledTimes(1)
     resetQuotaBlindStateForTest()
-    note({ ...estimate, source: 'unknown' }, NOW + 60 * 60_000, notify)
-    expect(notify).toHaveBeenCalledTimes(2)
+    note({ ...estimate, source: 'unknown', generatedAtMs: estimate.generatedAtMs + 240_000 }, NOW + 240_000, notify)
+    note({ ...estimate, source: 'unknown', generatedAtMs: estimate.generatedAtMs + 300_000 }, NOW + 300_000, notify)
+    note({ ...estimate, source: 'unknown', generatedAtMs: estimate.generatedAtMs + 360_000 }, NOW + 360_000, notify)
+    expect(notify).toHaveBeenCalledTimes(2) // a different source is a different streak, alerts on its own 3rd strike
   })
 
   it('no snapshot (collector not enabled) is not blind: no log, no notice', () => {

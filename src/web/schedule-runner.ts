@@ -1449,27 +1449,56 @@ function readQuotaHardAtPercent(): number {
 }
 
 // The gate fails open on an untrusted or stale snapshot (quota-gate.ts); that
-// must not be silent. One log line per state change, and one owner notice when
-// the gate goes blind; quiet until it can see again. The blind kind and the source
-// that were alerted on are kept in store/ (no timestamp: a running collector rewrites
-// an estimate every 15 minutes), so a restart while the same blindness lasts does
-// not notify again.
+// must not be silent, but it also must not nag on a single blip. Péter's rule
+// (2026-11-23 14:56 Telegram): only notify once the SAME blindness signature
+// (kind + source) has shown up on at least QUOTA_BLIND_NOTIFY_AFTER DISTINCT
+// collector readings in a row -- not N re-checks of one stale reading still
+// sitting there a tick or two later, and not a running total across signature
+// changes (a kind/source change starts its own fresh count: it is evidence of
+// a *different* problem, not three strikes of the same one). A lone bad
+// reading usually recovers on its own by the next collector run and is not
+// worth an interruption. The streak and the already-alerted signature both
+// live in store/, not just memory: this fleet restarts often enough
+// (context-guard, dashboard restarts) that an in-memory-only streak would
+// rarely reach the threshold.
 let quotaBlindState: ReturnType<typeof quotaBlindness> = null
 
 const QUOTA_BLIND_ALERT_PATH = join(PROJECT_ROOT, 'store', 'quota-blind-alert.json')
+const QUOTA_BLIND_NOTIFY_AFTER = 3
 
-export interface AlertedKeyStore { read(): string | null; write(key: string): void }
+export interface BlindStreakState {
+  /** The `${kind}|${source}` signature the current occurrence count belongs to. */
+  countingKey: string | null
+  /** Consecutive DISTINCT blind readings seen so far for countingKey. */
+  occurrences: number
+  /** generatedAtMs of the last reading counted, so a repeat tick of the same
+   *  reading (collector hasn't run again yet) does not inflate the count. */
+  lastReadingAtMs: number | null
+  /** The signature already alerted on, or null when none; survives a restart
+   *  independently of countingKey so a duplicate notice is never sent for a
+   *  streak already reported. */
+  alertedKey: string | null
+}
+
+const EMPTY_BLIND_STREAK: BlindStreakState = { countingKey: null, occurrences: 0, lastReadingAtMs: null, alertedKey: null }
+
+export interface AlertedKeyStore { read(): BlindStreakState; write(state: BlindStreakState): void }
 
 const fileAlertedKeyStore: AlertedKeyStore = {
   read() {
     try {
-      const k = (JSON.parse(readFileSync(QUOTA_BLIND_ALERT_PATH, 'utf-8')) as { key?: unknown }).key
-      return typeof k === 'string' ? k : null
-    } catch { return null }
+      const d = JSON.parse(readFileSync(QUOTA_BLIND_ALERT_PATH, 'utf-8')) as Partial<BlindStreakState>
+      return {
+        countingKey: typeof d.countingKey === 'string' ? d.countingKey : null,
+        occurrences: typeof d.occurrences === 'number' ? d.occurrences : 0,
+        lastReadingAtMs: typeof d.lastReadingAtMs === 'number' ? d.lastReadingAtMs : null,
+        alertedKey: typeof d.alertedKey === 'string' ? d.alertedKey : null,
+      }
+    } catch { return { ...EMPTY_BLIND_STREAK } }
   },
-  write(key) {
-    try { atomicWriteFileSync(QUOTA_BLIND_ALERT_PATH, JSON.stringify({ key }) + '\n') } catch (err) {
-      logger.warn({ err }, 'schedule-runner: failed to persist the quota blind-alert key')
+  write(state) {
+    try { atomicWriteFileSync(QUOTA_BLIND_ALERT_PATH, JSON.stringify(state) + '\n') } catch (err) {
+      logger.warn({ err }, 'schedule-runner: failed to persist the quota blind streak')
     }
   },
 }
@@ -1481,29 +1510,52 @@ export function noteQuotaBlindness(
   alerted: AlertedKeyStore = fileAlertedKeyStore,
 ): void {
   const next = quotaBlindness(snapshot, nowMs)
-  if (next === quotaBlindState) return
   const prev = quotaBlindState
   quotaBlindState = next
+
   if (!next) {
-    logger.info({ previous: prev }, 'Quota gate sees the quota again (trusted, fresh snapshot)')
-    if (prev) alerted.write('')
+    if (prev) {
+      logger.info({ previous: prev }, 'Quota gate sees the quota again (trusted, fresh snapshot)')
+      alerted.write({ ...EMPTY_BLIND_STREAK })
+    }
     return
   }
-  const at = snapshot?.generatedAtMs
-  const ageMinutes = typeof at === 'number' ? Math.round((nowMs - at) / 60_000) : null
+
+  const key = `${next}|${snapshot?.source ?? 'none'}`
+  let streak = alerted.read()
+  if (streak.countingKey !== key) {
+    // First blind reading ever, or the signature changed mid-blindness:
+    // either way this is a fresh episode with its own three strikes to earn.
+    streak = { countingKey: key, occurrences: 0, lastReadingAtMs: null, alertedKey: streak.alertedKey }
+  }
+
+  const at = typeof snapshot?.generatedAtMs === 'number' ? snapshot.generatedAtMs : null
+  const isNewReading = streak.lastReadingAtMs === null || at !== streak.lastReadingAtMs
+  if (!isNewReading) return // same reading as last time: nothing new to log or count
+
+  const occurrences = streak.occurrences + 1
+  const ageMinutes = at !== null ? Math.round((nowMs - at) / 60_000) : null
   logger.warn(
-    { state: next, source: snapshot?.source ?? null, ageMinutes },
+    { state: next, source: snapshot?.source ?? null, ageMinutes, occurrence: occurrences },
     'Quota gate is blind: background tasks run unchecked (fail open) until a trusted, fresh snapshot arrives',
   )
-  if (prev) return
-  const key = `${next}|${snapshot?.source ?? 'none'}`
-  if (alerted.read() === key) return // same blindness already alerted on, before a restart
-  alerted.write(key)
+
+  if (occurrences < QUOTA_BLIND_NOTIFY_AFTER) {
+    alerted.write({ ...streak, occurrences, lastReadingAtMs: at })
+    return
+  }
+  if (streak.alertedKey === key) {
+    // Already alerted for this exact signature (possibly before a restart):
+    // keep the occurrence count current without sending a second notice.
+    alerted.write({ ...streak, occurrences, lastReadingAtMs: at })
+    return
+  }
+  alerted.write({ ...streak, occurrences, lastReadingAtMs: at, alertedKey: key })
   const why = next === 'untrusted-source'
     ? `a kvóta-pillanatkép forrása "${snapshot?.source ?? 'ismeretlen'}", ami nem mért szám`
     : `a legutóbbi kvóta-pillanatkép ${ageMinutes ?? '?'} perce készült`
   notify([
-    `[${BOT_NAME} scheduler] A kvóta-kapu nem látja a keretet: ${why}.`,
+    `[${BOT_NAME} scheduler] A kvóta-kapu nem látja a keretet: ${why} (${occurrences}. egymást követő mérés is ezt adta).`,
     'A háttérfeladatok ettől még futnak, de a kapu nem tudja visszafogni őket, ha fogy a keret.',
     'Javítás: a usage-collect feladat (scripts/usage-collect.py) adjon friss, mért számot; a részletek a dashboard.log-ban. Amíg így marad, nem szólok újra.',
   ].join('\n'))
