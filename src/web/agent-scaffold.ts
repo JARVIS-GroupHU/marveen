@@ -1345,7 +1345,8 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   // actual incident vector -- an agent answering its OWN posed question -- is
   // covered by the self-pace block + the #0 CLAUDE.md doctrine.
   if (agentGetsEmailGate(name)) {
-    injectEmailSendGate(existing, hasThreadReplyCapability(name, readAgentCapabilities(name)))
+    const caps = readAgentCapabilities(name)
+    injectEmailSendGate(existing, hasThreadReplyCapability(name, caps), hasStandingRecipientCapability(name, caps))
   }
   if (agentGetsGovernanceGates(name)) injectSelfPaceGate(existing)
   // (e) the dashboard DB's security surface and this install's gate wiring
@@ -1528,6 +1529,25 @@ export function hasThreadReplyCapability(name: string, capabilities: string[]): 
   return name !== MAIN_AGENT_ID && capabilities.includes(EMAIL_THREAD_REPLY_CAPABILITY)
 }
 
+// Owner decision 2026-11-23 (Peter, Telegram): a second, independent narrowing
+// of the same send_email hard-deny, alongside thread-reply, not instead of it
+// -- an agent may hold either, both or neither. Where thread-reply lets a
+// reply through to addresses already IN an existing thread, this one lets a
+// fresh send through to an address the owner has made a STANDING decision
+// about (store/email-standing-recipients.json + a resolved email_standing_
+// recipient approval, the same mechanism the main agent's own email_send
+// level-2 gate already uses -- see scripts/email-send-gate.mjs's
+// standingMatch/standingAuthorized for the full mechanics). Same capability
+// shape as thread-reply on purpose: a runtime override in agent-config.json
+// "capabilities", or the persona frontmatter default, and the main agent is
+// exempt from the gate entirely so the capability is meaningless there.
+export const EMAIL_STANDING_RECIPIENT_CAPABILITY = 'email:standing-recipient'
+export const EMAIL_STANDING_RECIPIENT_FLAG = '--allow-standing-recipient'
+
+export function hasStandingRecipientCapability(name: string, capabilities: string[]): boolean {
+  return name !== MAIN_AGENT_ID && capabilities.includes(EMAIL_STANDING_RECIPIENT_CAPABILITY)
+}
+
 // The matcher is a FULL-match regex against the tool name, and an MCP tool's
 // name is the qualified `mcp__<server>__<tool>` -- so a bare `send_email`
 // alternative never fires for an MCP server (verified live 2026-08-10: a
@@ -1631,18 +1651,24 @@ export function emailGateCommandStale(preToolUse: unknown, expected: string): bo
 // 2026-09-10 -- but the hook stays primary: future CLI behavior is not a
 // contract.) Name-agnostic so a customer install
 // gates its own sub-agents (the caller's MAIN_AGENT_ID guard exempts the owner).
-export function injectEmailSendGate(existing: Record<string, unknown>, threadReply = false): void {
+export function injectEmailSendGate(existing: Record<string, unknown>, threadReply = false, standingRecipient = false): void {
   const hooks = (existing.hooks && typeof existing.hooks === 'object'
     ? existing.hooks
     : (existing.hooks = {})) as Record<string, unknown>
   const base = hookCommand(join(PROJECT_ROOT, 'scripts', 'email-send-gate.mjs'))
   // Registration guard: a /tmp or missing path must never enter shared settings.
   if (isUnsafeHookCommand(base)) return
-  // The thread-reply capability rides on the hook COMMAND, so the grant lives
-  // in the same regenerated-on-every-spawn settings.json as the gate itself:
-  // revoking the capability removes the flag at the next spawn, and a manual
-  // settings edit can neither grant nor keep it.
-  const command = threadReply ? hookCommand(join(PROJECT_ROOT, 'scripts', 'email-send-gate.mjs'), [EMAIL_THREAD_REPLY_FLAG]) : base
+  // Both capabilities ride on the hook COMMAND, so each grant lives in the
+  // same regenerated-on-every-spawn settings.json as the gate itself:
+  // revoking either capability removes its flag at the next spawn, and a
+  // manual settings edit can neither grant nor keep either one. Independent
+  // flags, independent of each other -- an agent may hold one, both or
+  // neither, and the gate script checks each on its own.
+  const flags = [
+    ...(threadReply ? [EMAIL_THREAD_REPLY_FLAG] : []),
+    ...(standingRecipient ? [EMAIL_STANDING_RECIPIENT_FLAG] : []),
+  ]
+  const command = flags.length ? hookCommand(join(PROJECT_ROOT, 'scripts', 'email-send-gate.mjs'), flags) : base
   const entry = {
     matcher: EMAIL_GATE_MATCHER,
     hooks: [{ type: 'command', command, timeout: 10 }],
@@ -3142,9 +3168,15 @@ export function ensureGovernanceGateCommands(name: string, profile?: ProfileTemp
   // wired at all, or it IS wired but under a pre-2026-08-10 matcher that cannot
   // match a qualified MCP tool name. The second one is why the wiring check
   // alone is not enough -- it would report the gate healthy forever.
-  const threadReply = hasThreadReplyCapability(name, readAgentCapabilities(name))
-  const emailCmdExpected = threadReply
-    ? hookCommand(join(PROJECT_ROOT, 'scripts', 'email-send-gate.mjs'), [EMAIL_THREAD_REPLY_FLAG])
+  const emailCaps = readAgentCapabilities(name)
+  const threadReply = hasThreadReplyCapability(name, emailCaps)
+  const standingRecipient = hasStandingRecipientCapability(name, emailCaps)
+  const emailFlags = [
+    ...(threadReply ? [EMAIL_THREAD_REPLY_FLAG] : []),
+    ...(standingRecipient ? [EMAIL_STANDING_RECIPIENT_FLAG] : []),
+  ]
+  const emailCmdExpected = emailFlags.length
+    ? hookCommand(join(PROJECT_ROOT, 'scripts', 'email-send-gate.mjs'), emailFlags)
     : emailCmd
   const needEmail = agentGetsEmailGate(name)
     && (!hookCommandWired(ptuJson, emailCmdExpected)
@@ -3189,7 +3221,7 @@ export function ensureGovernanceGateCommands(name: string, profile?: ProfileTemp
   if (!needEmail && !needPace && !needDbGate && !needMxdGate && !needDestructive && !needCredential && !needReviewer && !dropReviewer) return false
   // The injectors dedupe by script basename, so a stale bare-`node` entry is
   // replaced in place rather than accumulated.
-  if (needEmail) injectEmailSendGate(settings, threadReply)
+  if (needEmail) injectEmailSendGate(settings, threadReply, standingRecipient)
   if (needPace) injectSelfPaceGate(settings)
   if (needDbGate) injectDbWriteGate(settings)
   if (needMxdGate) injectMxdPathGate(settings)

@@ -31,10 +31,12 @@
 // writeAgentSettingsFromProfile() (agent-scaffold.ts), guarded by
 // name !== MAIN_AGENT_ID, and re-applied on every spawn (respawn-safe).
 
-import { closeSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
+import { appendFileSync, closeSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path'
 import { homedir } from 'node:os'
+import { createHash } from 'node:crypto'
+import { createRequire } from 'node:module'
 
 // HOOKDEPLOAD1008: the ledger module is a DYNAMIC import. As a static import, a
 // broken recipient-ledger.mjs (a syntax error, a conflicted merge, a missing
@@ -3580,6 +3582,208 @@ export function buildThreadDenyMsg(botName, detail) {
   )
 }
 
+// --- Standing-recipient narrowing (--allow-standing-recipient) -------------
+//
+// Owner decision 2026-11-23 (Peter, Telegram): a capability-holding sub-agent
+// may send DIRECTLY to a recipient the owner has, once, made a STANDING
+// decision about -- without a fresh per-letter approval and without routing
+// through the main agent. This is the SAME mechanism the main agent's own
+// email_send level-2 gate already uses (scripts/hooks/email-approval-gate.py,
+// EMAILALLANDOCIMZETT926): one shared list (store/email-standing-recipients.json)
+// and one shared approval category (email_standing_recipient), so a single
+// owner decision about an address authorizes whichever side (main agent at
+// level 2, or a capability-flagged sub-agent here) actually needs to send to
+// it. Ported function-for-function from the Python gate so the two can never
+// silently disagree about what "standing" means; see that file's docstring
+// for the full review history (list-is-a-candidate / approval-makes-it-live
+// separation, last-resolved-decision-wins, no time window, no consumption).
+//
+// Deliberately narrower here than on the main agent: this path only narrows
+// the DIRECT `send_email` kind (never connector-send, send-draft, manage_email
+// or a Bash send), mirroring exactly how --allow-thread-reply was scoped --
+// the structured send_email call is the only shape whose envelope this file
+// can read and anchor with full confidence.
+const ROOT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..')
+const STORE_DIR = join(ROOT_DIR, 'store')
+const STANDING_PATH = join(STORE_DIR, 'email-standing-recipients.json')
+const STANDING_LOG = join(STORE_DIR, 'email-standing-sends.log')
+const STANDING_DB_PATH = join(STORE_DIR, 'claudeclaw.db')
+export const STANDING_CATEGORY = 'email_standing_recipient'
+
+// Read the standing list. Mirrors read_standing() in email-approval-gate.py:
+// a MISSING file means no standing rights (normal, not a fault); a CORRUPT or
+// wrongly-shaped file ALSO yields no rights (fail-closed) but returns a note,
+// because an empty set from a broken file must not look like an empty set
+// from no file at all -- that silent failure is the one this gate cannot
+// afford. Accepted shapes: {"recipients": [...]} or a bare list; each entry
+// either an address string or {"address": ..., "note": ...}.
+export function readStandingList(readFile = (p) => readFileSync(p, 'utf-8')) {
+  let raw
+  try {
+    raw = readFile(STANDING_PATH)
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { standing: new Set(), note: null }
+    return { standing: new Set(), note: `az allando cimzett-lista nem olvashato (${err?.message ?? err}) -> nincs allando jog (fail-closed)` }
+  }
+  let data
+  try {
+    data = JSON.parse(raw)
+  } catch (err) {
+    return { standing: new Set(), note: `az allando cimzett-lista nem ervenyes JSON (${err?.message ?? err}) -> nincs allando jog (fail-closed)` }
+  }
+  const list = Array.isArray(data) ? data : data?.recipients
+  if (!Array.isArray(list)) {
+    return { standing: new Set(), note: 'az allando cimzett-lista alakja nem lista -> nincs allando jog (fail-closed)' }
+  }
+  const out = new Set()
+  for (const item of list) {
+    const addr = typeof item === 'string' ? item : (typeof item?.address === 'string' ? item.address : null)
+    if (addr == null) continue
+    const { addresses } = parseAddresses(addr)
+    for (const a of addresses) out.add(a)
+  }
+  return { standing: out, note: null }
+}
+
+const ANCHOR_TOKEN_PREFIXES = ['messageId:', 'reply_to:']
+
+// The address this send_email call may go to WITHOUT a fresh approval, or
+// null. Mirrors standing_match() in email-approval-gate.py exactly: a
+// deliberately narrow match, because this is the one path that authorizes
+// without a human deciding on THIS letter.
+//   - a reply addressed by its original (reply_to field, or a `to` entry that
+//     is really an anchor token) is never a standing-list send: its real
+//     recipient was never read by this gate;
+//   - cc and bcc must both be empty;
+//   - exactly ONE address must resolve out of `to`, and it must be listed.
+export function standingMatch(toolInput, standing) {
+  if (!standing || !standing.size) return null
+  if (toolInput?.reply_to) return null
+  const toRaw = Array.isArray(toolInput?.to) ? toolInput.to : (toolInput?.to == null ? [] : [toolInput.to])
+  if (toRaw.some((v) => ANCHOR_TOKEN_PREFIXES.some((p) => String(v).startsWith(p)))) return null
+  for (const field of ['cc', 'bcc']) {
+    const v = toolInput?.[field]
+    const arr = Array.isArray(v) ? v : (v == null ? [] : [v])
+    if (arr.some((x) => String(x ?? '').trim())) return null
+  }
+  const { addresses, unparseable } = parseAddresses(toRaw)
+  if (unparseable.length || addresses.length !== 1) return null
+  return standing.has(addresses[0]) ? addresses[0] : null
+}
+
+// sha256 over the normalised address, matching readStandingList's own
+// normalisation (parseAddresses lowercases), so the owner's approval and the
+// list entry can never disagree about what was approved.
+export function standingAnchor(addr) {
+  return createHash('sha256').update(String(addr).trim().toLowerCase()).digest('hex')
+}
+
+// Resolve require() for better-sqlite3 from this file's own location (ships
+// in the repo root's node_modules, reachable from any cwd this way -- same
+// reasoning as LEDGER_CLI above).
+function requireFromHere() {
+  return createRequire(import.meta.url)
+}
+
+// Is THIS address live? Returns { live, detail }. Throws on any DB problem --
+// the caller turns that into a fail-closed deny, exactly as the main agent's
+// per-letter path does: "cannot decide" never means "allowed". The LAST
+// resolved decision wins (ORDER BY resolved_at DESC, rowid DESC), so a later
+// rejection revokes an earlier approval without anyone touching the list file.
+export function standingAuthorized(addr, dbPath = STANDING_DB_PATH, requireFn = requireFromHere()) {
+  const Database = requireFn('better-sqlite3')
+  if (!isAbsolute(dbPath)) throw new Error(`relative dbPath not allowed: ${dbPath}`)
+  const anchor = standingAnchor(addr)
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true })
+  try {
+    db.pragma('busy_timeout = 5000')
+    const row = db.prepare(
+      `SELECT id, status FROM approvals WHERE category = ? AND content_hash = ? AND resolved_at IS NOT NULL
+       ORDER BY resolved_at DESC, rowid DESC LIMIT 1`,
+    ).get(STANDING_CATEGORY, anchor)
+    if (row && row.status === 'approved') return { live: true, detail: row.id }
+    if (row) return { live: false, detail: `a gazda utolso dontese erre a cimre: ${row.status} (${row.id})` }
+    const pending = db.prepare(
+      `SELECT id FROM approvals WHERE category = ? AND content_hash = ? AND status = 'pending' LIMIT 1`,
+    ).get(STANDING_CATEGORY, anchor)
+    if (pending) return { live: false, detail: `a cim elesitese FUGGOBEN van a gazdanal (${pending.id})` }
+    return { live: false, detail: 'ehhez a cimhez nincs gazdai elesites' }
+  } finally {
+    db.close()
+  }
+}
+
+function postDailyLog(agentName, text, fetchImpl = fetch, readFile = (p) => readFileSync(p, 'utf-8')) {
+  let token
+  try {
+    token = readFile(join(STORE_DIR, '.dashboard-token')).trim()
+  } catch (err) {
+    return Promise.resolve({ ok: false, detail: `nincs dashboard-token (${err?.message ?? err})` })
+  }
+  if (!token) return Promise.resolve({ ok: false, detail: 'ures dashboard-token' })
+  let port = '3420'
+  try {
+    const env = readFile(join(ROOT_DIR, '.env'))
+    const m = env.match(/^\s*WEB_PORT\s*=\s*['"]?(\d+)/m)
+    if (m) port = m[1]
+  } catch { /* default port */ }
+  const url = `http://127.0.0.1:${port}/api/daily-log`
+  return fetchImpl(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent_id: agentName, content: text }),
+    signal: AbortSignal.timeout(4000),
+  }).then((res) => (res.ok ? { ok: true, detail: 'ok' } : { ok: false, detail: `HTTP ${res.status}` }))
+    .catch((err) => ({ ok: false, detail: String(err?.message ?? err) }))
+}
+
+// Record an approval-free send: a local append-only log line (the caller
+// denies if THIS fails -- an unrecordable approval-free send is exactly the
+// invisible hole the standing list would otherwise open) and a best-effort
+// post to the dashboard's daily log (the owner's actual reading surface).
+// Returns null when the owner was reached, otherwise the reason he was not,
+// so the caller can say so in the allow-side systemMessage -- the sending
+// agent must never believe the owner saw it when he did not.
+export async function standingTrace(agentName, addr, summaryText, opts = {}) {
+  const fetchImpl = opts.fetchImpl ?? fetch
+  const appendFile = opts.appendFile ?? appendFileSync
+  const readFile = opts.readFile ?? ((p) => readFileSync(p, 'utf-8'))
+  const logPath = opts.logPath ?? STANDING_LOG
+  const stamp = new Date().toLocaleString('sv-SE', { timeZoneName: 'short' })
+  const head = String(summaryText ?? '').replace(/\n/g, ' ').trim().slice(0, 120) || '(nincs szoveg)'
+  const { ok, detail } = await postDailyLog(agentName, (
+    `## ${new Date().toTimeString().slice(0, 5)} -- ${agentName} levelet kuldott JOVAHAGYAS NELKUL (allando cimzett)\n` +
+    `Cimzett: ${addr}\n` +
+    `Level eleje: ${head}\n` +
+    'Ez a level az allando cimzett-lista alapjan ment ki, per-level jovahagyas nelkul. ' +
+    'Ha erre a cimre nem akarod ezt, vedd ki a cimet a listabol.'
+  ), fetchImpl, readFile)
+  // appendFile throws on failure; the caller (entrypoint) turns that into a deny.
+  appendFile(logPath, `${stamp} allando cimzett, jovahagyas nelkuli kuldes | agent=${agentName} | cimzett=${addr} | level-eleje=${JSON.stringify(head)} | gazda-ertesites=${ok ? 'ok' : `NEM MENT KI (${detail})`}\n`, 'utf-8')
+  return ok ? null : detail
+}
+
+// Best-effort subject+body summary for the standing-send trace log. Not a
+// security anchor (the list match already pinned the recipient); purely for
+// the human reading the owner's daily log.
+function envelopeSummary(toolInput) {
+  const subject = toolInput?.subject ? String(toolInput.subject) : ''
+  const body = toolInput?.body ?? toolInput?.text ?? toolInput?.message ?? ''
+  return [subject, String(body)].filter(Boolean).join(' - ')
+}
+
+// Deny wording for the standing-recipient narrowing's failure arms.
+export function buildStandingDenyMsg(detail) {
+  return (
+    `email_send (allando cimzett): ${detail}` +
+    (detail.includes('nincs gazdai elesites')
+      ? `\nElesites KERESE: POST /api/approvals a sajat agent_id-ddal, category="${STANDING_CATEGORY}", ` +
+        'content_hash=sha256(a cim, kisbetuvel, levagott szokozokkel), action_description=melyik cimet es miert. ' +
+        'A dontes a gazdae: a sajat keresedet NE hagyd jova.'
+      : '')
+  )
+}
+
 function allow() { process.exit(0) }
 
 function deny(reason) {
@@ -3653,6 +3857,38 @@ if (isInvokedDirectly()) {
       }
       if (verdict.allow) allow()
       deny(buildThreadDenyMsg(botName, verdict.reason))
+    }
+    // Standing-recipient narrowing: same scope rule as thread-reply above --
+    // capability-driven flag, direct send_email tool only.
+    if (kind === 'send_email' && process.argv.includes('--allow-standing-recipient')) {
+      const { standing, note } = readStandingList()
+      const notePrefix = note ? `(${note}) ` : ''
+      const addr = standingMatch(payload?.tool_input, standing)
+      if (!addr) {
+        deny(notePrefix + buildStandingDenyMsg(
+          'a cimzett nincs rajta az allando listan, vagy cc/bcc nem ures, vagy tobb cimzett szerepel egy hivasban ' +
+          '(a lista csak az EGYETLEN, cc/bcc nelkuli cimzettre vonatkozik)',
+        ))
+      }
+      let auth
+      try {
+        auth = standingAuthorized(addr)
+      } catch (err) {
+        deny(notePrefix + buildStandingDenyMsg(`${addr}: az elesitese nem ellenorizheto (${err?.message ?? err}) -- nem-eldontheto, ezert fail-closed TILTVA`))
+      }
+      if (!auth.live) {
+        deny(notePrefix + buildStandingDenyMsg(
+          `${addr} rajta van az allando listan, DE NINCS ELESITVE -- ${auth.detail}. ` +
+          `Cim-horgony (sha256): ${standingAnchor(addr)}`,
+        ))
+      }
+      const agentName = basename(String(payload?.cwd || process.cwd()))
+      try {
+        await standingTrace(agentName, addr, envelopeSummary(payload?.tool_input))
+      } catch (err) {
+        deny(notePrefix + buildStandingDenyMsg(`${addr}: a kuldes nem rogzitheto (${err?.message ?? err}) -- fail-closed TILTVA`))
+      }
+      allow()
     }
     deny(buildGateMsg(botName, ownerName))
   }
