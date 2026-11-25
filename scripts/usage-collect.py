@@ -74,12 +74,18 @@ CONFIG = {
     # when it is younger than this. It is token-free and carries the same
     # rate_limits block the official endpoint does, but it is only rewritten
     # while the main agent renders, so it goes stale when that session idles.
-    # 10 min: the collector runs every 15 min and the gate (quota-gate.ts)
-    # counts a snapshot older than 20 min as unknown, so a reading that was
-    # already 10 min old when collected is at most ~25 min old when the gate
-    # last sees it; anything older would let the gate act on a number that
-    # has had a long time to move. Older -> not used, fall through (fail open).
-    "claude_statusline_max_age_min": 10,
+    # 15 min (raised from 10, 2026-11-25, QUOTABLINDOVERNIGHT1125): the
+    # collector now runs every 5 min (reduced from 15 at the owner's request),
+    # so a 10-min window tolerated only one missed cycle -- measured live
+    # 2026-11-24 23:00-03:00, when the authoritative token sat on HTTP 401/429
+    # for the whole stretch: several 2-5-cycle blind streaks fell through to
+    # the raw estimate because the statusline had also gone stale in the gap.
+    # 15 min = 3 missed 5-min cycles of tolerance, while the gate (quota-gate.ts,
+    # staleAfterMs) still treats anything past 20 min as unknown regardless --
+    # this leaves a 5-min margin for collection + propagation lag before that
+    # hard ceiling, rather than consuming nearly all of it. Older -> not used,
+    # fall through (fail open).
+    "claude_statusline_max_age_min": 15,
 }
 
 
